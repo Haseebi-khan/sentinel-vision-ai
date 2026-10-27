@@ -1,0 +1,19 @@
+{
+  "event_id": "evt-0002",
+  "timestamp": "2026-10-27T21:20:00Z",
+  "camera_id": "driveway",
+  "snapshot_url": "http://frigate.local:5000/api/events/evt-0002/snapshot.jpg",
+  "detection": {
+    "label": "car",
+    "confidence": 0.88,
+    "bounding_box": [100, 200, 600, 350]
+  },
+  "biometrics": {
+    "recognized": false,
+    "person_name": "unknown"
+  },
+  "alpr": {
+    "plate_text": "ABC123",
+    "plate_confidence": 0.82
+  }
+}
