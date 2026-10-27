@@ -12,9 +12,9 @@ Standard library only. Never raises from analyze(): any failure returns
 analysis_status "unavailable", which n8n turns into a human-review fallback.
 
 Configuration (environment variables):
-    VLM_PROVIDER   "anthropic" (default) or "openai" (any OpenAI-compatible server, incl. local Ollama)
+    VLM_PROVIDER   "anthropic" (default), "gemini", or "openai" (any OpenAI-compatible server, incl. local Ollama)
     VLM_API_KEY    API key. Required for anthropic, optional for local servers.
-    VLM_MODEL      Model name. Has a default for anthropic, required for openai.
+    VLM_MODEL      Model name. Has a default for anthropic, required for openai and gemini.
     VLM_API_URL    Override the endpoint (e.g. http://localhost:11434/v1/chat/completions for Ollama).
     VLM_TIMEOUT    Seconds to wait for the model (default 30).
     VLM_SKIP_RECOGNIZED  Set to 0 to also send recognised household members to the model.
@@ -34,11 +34,15 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# Provider "anthropic" speaks the Messages API. Provider "openai" speaks the
-# OpenAI-style chat-completions API, which also covers Ollama (/v1), vLLM and LM Studio.
+# "anthropic" speaks the Messages API. "openai" speaks the OpenAI-style chat-completions API, which also
+# covers Ollama (/v1), vLLM and LM Studio. "gemini" is a preset that uses Google's OpenAI-compatible endpoint.
 PROVIDERS = {
-    "anthropic": {"url": "https://api.anthropic.com/v1/messages", "model": "claude-sonnet-5-5", "key_required": True},
-    "openai": {"url": "https://api.openai.com/v1/chat/completions", "model": "", "key_required": False},
+    "anthropic": {"style": "anthropic", "url": "https://api.anthropic.com/v1/messages",
+                  "model": "claude-sonnet-5-5", "key_required": True},
+    "openai": {"style": "openai", "url": "https://api.openai.com/v1/chat/completions",
+               "model": "", "key_required": False},
+    "gemini": {"style": "openai", "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+               "model": "", "key_required": True},
 }
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_BODY_BYTES = 64 * 1024
@@ -142,6 +146,7 @@ def get_config():
     default = PROVIDERS[provider]
     cfg = {
         "provider": provider,
+        "style": default["style"],
         "url": os.environ.get("VLM_API_URL") or default["url"],
         "model": os.environ.get("VLM_MODEL") or default["model"],
         "key": os.environ.get("VLM_API_KEY", ""),
@@ -173,7 +178,7 @@ def _post_json(url, body, headers, timeout):
 def call_api(system, media_type, image_b64, context_text, cfg):
     """Send the snapshot to the configured provider and return the reply text."""
     user_text = "Detector metadata:\n" + context_text + "\n\nReturn the JSON object."
-    if cfg["provider"] == "anthropic":
+    if cfg["style"] == "anthropic":
         body = {
             "model": cfg["model"],
             "max_tokens": 500,

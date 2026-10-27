@@ -25,7 +25,7 @@ GOOD = {
 }
 
 
-CFG = {"provider": "anthropic", "url": "", "model": "test-model", "key": "k", "timeout": 5}
+CFG = {"provider": "anthropic", "style": "anthropic", "url": "", "model": "test-model", "key": "k", "timeout": 5}
 
 
 def fake_loader(ref):
@@ -181,6 +181,18 @@ class ConfigTests(unittest.TestCase):
         os.environ["VLM_MODEL"] = "llava"
         self.assertEqual(v.get_config()["key"], "")
 
+    def test_gemini_preset(self):
+        os.environ["VLM_PROVIDER"] = "gemini"
+        with self.assertRaises(v.AnalyzerError):      # key and model both required
+            v.get_config()
+        os.environ["VLM_API_KEY"] = "k"
+        with self.assertRaises(v.AnalyzerError):
+            v.get_config()
+        os.environ["VLM_MODEL"] = "some-gemini-model"
+        cfg = v.get_config()
+        self.assertEqual(cfg["style"], "openai")
+        self.assertIn("generativelanguage.googleapis.com", cfg["url"])
+
     def test_unknown_provider(self):
         os.environ["VLM_PROVIDER"] = "nope"
         with self.assertRaises(v.AnalyzerError):
@@ -230,7 +242,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(block["source"]["type"], "base64")
 
     def test_openai_request_shape_without_key(self):
-        cfg = {"provider": "openai", "url": self.base + "/v1/chat/completions",
+        cfg = {"provider": "openai", "style": "openai", "url": self.base + "/v1/chat/completions",
                "model": "llava", "key": "", "timeout": 5}
         out = self.run_provider(cfg)
         self.assertEqual(out["analysis_status"], "completed")
@@ -241,7 +253,7 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(image.startswith("data:image/jpeg;base64,"))
 
     def test_openai_sends_bearer_key(self):
-        cfg = {"provider": "openai", "url": self.base + "/v1/chat/completions",
+        cfg = {"provider": "openai", "style": "openai", "url": self.base + "/v1/chat/completions",
                "model": "m", "key": "secret", "timeout": 5}
         self.run_provider(cfg)
         self.assertEqual(FakeModelServer.seen["headers"]["authorization"], "Bearer secret")

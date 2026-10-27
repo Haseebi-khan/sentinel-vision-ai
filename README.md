@@ -8,11 +8,11 @@ recommended action and a human-review flag. The result is designed to plug strai
 workflow such as n8n.
 
 It has no third-party dependencies (Python 3.9+ standard library only) and works with Anthropic models,
-any OpenAI-compatible API, or a local model served by Ollama.
+Google Gemini, any OpenAI-compatible API, or a local model served by Ollama.
 
 ## Features
 
-- **Provider-agnostic.** Anthropic, OpenAI, or any OpenAI-compatible server (Ollama, vLLM, LM Studio).
+- **Provider-agnostic.** Anthropic, Google Gemini, OpenAI, or any OpenAI-compatible server (Ollama, vLLM, LM Studio).
 - **Fails safe.** Any error (network, bad key, unreadable image, malformed reply) returns
   `analysis_status: "unavailable"`, so downstream automation falls back to human review rather than staying silent.
 - **Privacy aware.** Recognised household members are scored locally and their snapshots never leave the machine.
@@ -65,9 +65,9 @@ All settings are environment variables. Keys are never read from files in the re
 
 | Variable | Description | Default |
 |---|---|---|
-| `VLM_PROVIDER` | `anthropic` or `openai` (any OpenAI-compatible server) | `anthropic` |
+| `VLM_PROVIDER` | `anthropic`, `gemini`, or `openai` (any OpenAI-compatible server) | `anthropic` |
 | `VLM_API_KEY` | API key. Required for `anthropic`, optional for local servers | none |
-| `VLM_MODEL` | Model name. Required for `openai` | `claude-sonnet-5-5` for `anthropic` |
+| `VLM_MODEL` | Model name. Required for `openai` and `gemini` | `claude-sonnet-5-5` for `anthropic` |
 | `VLM_API_URL` | Endpoint override | provider default |
 | `VLM_TIMEOUT` | Seconds to wait for the model | `30` |
 | `VLM_SKIP_RECOGNIZED` | `0` to also send recognised household members to the model | `1` |
@@ -75,6 +75,9 @@ All settings are environment variables. Keys are never read from files in the re
 ```bash
 # Anthropic
 export VLM_API_KEY=your-key
+
+# Google Gemini (key from Google AI Studio; pick a vision-capable model)
+export VLM_PROVIDER=gemini VLM_API_KEY=your-key VLM_MODEL=<gemini model name>
 
 # OpenAI
 export VLM_PROVIDER=openai VLM_API_KEY=your-key VLM_MODEL=<vision-capable model>
@@ -151,7 +154,7 @@ In n8n, call it from an HTTP Request node placed before the threat-assessment st
 python3 -I tests/test_analyzer.py
 ```
 
-The 33 tests run offline against local stand-in servers, so no API key is needed. They cover response parsing and
+The 34 tests run offline against local stand-in servers, so no API key is needed. They cover response parsing and
 validation, both provider request formats, failure fallbacks, image handling and the service's security checks.
 
 ## Project status
@@ -167,3 +170,4 @@ Planned:
 - Never commit an API key. Keys are read from the environment only.
 - The service fetches images from URLs in the request body, so set `VLM_ALLOWED_IMAGE_HOSTS` and `VLM_SERVICE_TOKEN`.
 - Sending a snapshot to a cloud provider means that image leaves your network. Use a local model if that is not acceptable.
+- Free API tiers may allow the provider to use submitted content to improve its products. Use test images only on a free tier.
