@@ -17,6 +17,7 @@ Configuration (environment variables):
     VLM_MODEL      Model name. Has a default for anthropic, required for openai and gemini.
     VLM_API_URL    Override the endpoint (e.g. http://localhost:11434/v1/chat/completions for Ollama).
     VLM_TIMEOUT    Seconds to wait for the model (default 30).
+    VLM_REASONING_EFFORT  Optional ("none", "low", ...). Lower is faster on models that "think" (e.g. Gemini).
     VLM_SKIP_RECOGNIZED  Set to 0 to also send recognised household members to the model.
 
 Usage:
@@ -29,6 +30,7 @@ import base64
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -151,6 +153,7 @@ def get_config():
         "model": os.environ.get("VLM_MODEL") or default["model"],
         "key": os.environ.get("VLM_API_KEY", ""),
         "timeout": float(os.environ.get("VLM_TIMEOUT", "30")),
+        "reasoning_effort": os.environ.get("VLM_REASONING_EFFORT", "").strip().lower(),
     }
     if not cfg["model"]:
         raise AnalyzerError("VLM_MODEL must be set for provider %r" % provider)
@@ -159,20 +162,37 @@ def get_config():
     return cfg
 
 
-def _post_json(url, body, headers, timeout):
+def _error_message(exc):
+    """Short provider error text (e.g. 'model overloaded'), never the request or the key."""
+    try:
+        data = json.load(exc)
+        data = data[0] if isinstance(data, list) and data else data
+        err = data.get("error", {})
+        msg = err.get("message") if isinstance(err, dict) else err
+        return str(msg)[:160] if msg else ""
+    except (ValueError, AttributeError, OSError):
+        return ""
+
+
+def _post_json(url, body, headers, timeout, retries=1):
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
         headers=dict({"content-type": "application/json"}, **headers),
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.load(resp)
-    except urllib.error.HTTPError as exc:
-        raise AnalyzerError("model API returned HTTP %d" % exc.code)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise AnalyzerError("model API call failed: %s" % exc)
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 503) and attempt < retries:
+                time.sleep(2)          # transient overload: one quick retry
+                continue
+            detail = _error_message(exc)
+            raise AnalyzerError("model API returned HTTP %d%s" % (exc.code, ": " + detail if detail else ""))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise AnalyzerError("model API call failed: %s" % exc)
 
 
 def call_api(system, media_type, image_b64, context_text, cfg):
@@ -206,6 +226,8 @@ def call_api(system, media_type, image_b64, context_text, cfg):
                 ]},
             ],
         }
+        if cfg.get("reasoning_effort"):
+            body["reasoning_effort"] = cfg["reasoning_effort"]
         headers = {"authorization": "Bearer " + cfg["key"]} if cfg["key"] else {}
         payload = _post_json(cfg["url"], body, headers, cfg["timeout"])
         try:

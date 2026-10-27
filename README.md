@@ -70,14 +70,16 @@ All settings are environment variables. Keys are never read from files in the re
 | `VLM_MODEL` | Model name. Required for `openai` and `gemini` | `claude-sonnet-5-5` for `anthropic` |
 | `VLM_API_URL` | Endpoint override | provider default |
 | `VLM_TIMEOUT` | Seconds to wait for the model | `30` |
+| `VLM_REASONING_EFFORT` | Optional (`none`, `low`, ...). Lower is faster on models that "think", such as Gemini | unset |
 | `VLM_SKIP_RECOGNIZED` | `0` to also send recognised household members to the model | `1` |
 
 ```bash
 # Anthropic
 export VLM_API_KEY=your-key
 
-# Google Gemini (key from Google AI Studio; pick a vision-capable model)
-export VLM_PROVIDER=gemini VLM_API_KEY=your-key VLM_MODEL=<gemini model name>
+# Google Gemini (key from Google AI Studio; free tier works for testing)
+export VLM_PROVIDER=gemini VLM_API_KEY=your-key \
+       VLM_MODEL=gemini-3.1-flash-lite VLM_REASONING_EFFORT=low
 
 # OpenAI
 export VLM_PROVIDER=openai VLM_API_KEY=your-key VLM_MODEL=<vision-capable model>
@@ -86,6 +88,11 @@ export VLM_PROVIDER=openai VLM_API_KEY=your-key VLM_MODEL=<vision-capable model>
 export VLM_PROVIDER=openai VLM_MODEL=llava \
        VLM_API_URL=http://localhost:11434/v1/chat/completions
 ```
+
+Model names change. If you get a 404, list what your key can use:
+`curl -s https://generativelanguage.googleapis.com/v1beta/openai/models -H "Authorization: Bearer $VLM_API_KEY"`.
+Tested live with `gemini-3.1-flash-lite` (about 3 s per image). Larger "flash" models can take 15-25 s per image
+and may return 503 when busy; the analyzer retries once, then fails safe to human review.
 
 ## Input
 
@@ -154,12 +161,12 @@ In n8n, call it from an HTTP Request node placed before the threat-assessment st
 python3 -I tests/test_analyzer.py
 ```
 
-The 34 tests run offline against local stand-in servers, so no API key is needed. They cover response parsing and
+The 36 tests run offline against local stand-in servers, so no API key is needed. They cover response parsing and
 validation, both provider request formats, failure fallbacks, image handling and the service's security checks.
 
 ## Project status
 
-Working: analyzer, both providers, CLI, HTTP service, tests, and the design for the stateful agent.
+Working: analyzer, Anthropic / Gemini / OpenAI-compatible providers, CLI, HTTP service, tests (also verified live against Gemini), and the design for the stateful agent.
 
 Planned:
 - Stateful escalation rules (lingering, repeat visitors, package monitoring), specified in the design document.

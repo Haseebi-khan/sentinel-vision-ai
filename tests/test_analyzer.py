@@ -258,6 +258,18 @@ class ProviderTests(unittest.TestCase):
         self.run_provider(cfg)
         self.assertEqual(FakeModelServer.seen["headers"]["authorization"], "Bearer secret")
 
+    def test_reasoning_effort_is_sent_when_set(self):
+        cfg = {"provider": "gemini", "style": "openai", "url": self.base + "/v1/chat/completions",
+               "model": "m", "key": "k", "timeout": 5, "reasoning_effort": "low"}
+        self.run_provider(cfg)
+        self.assertEqual(FakeModelServer.seen["body"]["reasoning_effort"], "low")
+
+    def test_reasoning_effort_omitted_by_default(self):
+        cfg = {"provider": "openai", "style": "openai", "url": self.base + "/v1/chat/completions",
+               "model": "m", "key": "", "timeout": 5}
+        self.run_provider(cfg)
+        self.assertNotIn("reasoning_effort", FakeModelServer.seen["body"])
+
     def test_dead_server_is_unavailable(self):
         out = self.run_provider(dict(CFG, url="http://127.0.0.1:1/x"))
         self.assertEqual(out["analysis_status"], "unavailable")
