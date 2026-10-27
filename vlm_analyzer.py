@@ -280,6 +280,22 @@ def unavailable(why):
     return {"analysis_status": "unavailable", "reason": why}
 
 
+def normalize_event(raw):
+    """Accept the webhook body, {"body": ...}, or the workflow's validated item ({"event": {...}} with flat fields)."""
+    if isinstance(raw.get("body"), dict):
+        raw = raw["body"]
+    if isinstance(raw.get("event"), dict):
+        raw = raw["event"]
+    if "detection" in raw or "biometrics" in raw:
+        return raw
+    out = dict(raw)
+    out["detection"] = {k: raw.get(k) for k in ("label", "confidence", "bounding_box")}
+    out["biometrics"] = {"recognized": raw.get("recognized"), "person_name": raw.get("person_name")}
+    if raw.get("plate_text"):
+        out["alpr"] = {"plate_text": raw.get("plate_text"), "plate_confidence": raw.get("plate_confidence")}
+    return out
+
+
 def recognized_resident(event):
     """Name of a face-matched household member, else None. Their snapshot is never sent out."""
     if os.environ.get("VLM_SKIP_RECOGNIZED", "1") == "0":
@@ -296,6 +312,7 @@ def recognized_resident(event):
 def analyze(event, image_ref=None, loader=load_image, caller=call_api, cfg=None):
     """Analyse one event. Never raises; failures come back as 'unavailable'."""
     try:
+        event = normalize_event(event)
         name = recognized_resident(event)
         if name:
             return {
@@ -357,8 +374,7 @@ def make_handler(token, allowed_hosts):
             def safe_loader(ref):
                 return load_image(ref, allow_files=False, allowed_hosts=allowed_hosts)
 
-            # n8n sends the webhook body, possibly wrapped as {"body": {...}}.
-            self._send(200, analyze(event.get("body", event), loader=safe_loader))
+            self._send(200, analyze(event, loader=safe_loader))
 
         def log_message(self, fmt, *args):
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))

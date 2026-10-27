@@ -38,7 +38,8 @@ camera -> NVR / object detector -> detection event + snapshot
                         automation workflow: alert, review, respond
 ```
 
-See [docs/agent-framework.md](docs/agent-framework.md) for the full design, including the per-entity state
+See [docs/n8n-integration.md](docs/n8n-integration.md) for the request/response contract and n8n setup, and
+[docs/agent-framework.md](docs/agent-framework.md) for the full design, including the per-entity state
 machine and escalation rules.
 
 ## Quick start
@@ -150,7 +151,7 @@ In n8n, call it from an HTTP Request node placed before the threat-assessment st
 python3 -I tests/test_analyzer.py
 ```
 
-The 29 tests run offline against local stand-in servers, so no API key is needed. They cover response parsing and
+The 33 tests run offline against local stand-in servers, so no API key is needed. They cover response parsing and
 validation, both provider request formats, failure fallbacks, image handling and the service's security checks.
 
 ## Project status

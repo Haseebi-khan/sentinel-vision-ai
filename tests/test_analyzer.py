@@ -102,6 +102,30 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(v.analyze(ev, cfg=CFG)["analysis_status"], "unavailable")
 
 
+class NormalizeTests(unittest.TestCase):
+    FLAT = {"event_id": "e1", "camera_id": "door", "label": "person", "confidence": 0.9,
+            "recognized": False, "person_name": "unknown", "plate_text": "AB12", "plate_confidence": 0.8,
+            "snapshot_url": "http://frigate.local/s.jpg"}
+
+    def test_nested_passthrough(self):
+        self.assertIs(v.normalize_event(EVENT), EVENT)
+
+    def test_body_wrapper(self):
+        self.assertEqual(v.normalize_event({"body": EVENT})["detection"]["label"], "person")
+
+    def test_flat_event_from_workflow(self):
+        out = v.normalize_event({"valid": True, "event": self.FLAT})
+        self.assertEqual(out["detection"]["label"], "person")
+        self.assertIs(out["biometrics"]["recognized"], False)
+        self.assertEqual(out["alpr"]["plate_text"], "AB12")
+        self.assertEqual(v.build_context(out)["detected_label"], "person")
+
+    def test_flat_resident_is_skipped(self):
+        flat = dict(self.FLAT, recognized=True, person_name="Ali")
+        out = v.analyze({"event": flat}, cfg=CFG)
+        self.assertEqual(out["model"], "local-rule")
+
+
 class ResidentTests(unittest.TestCase):
     RESIDENT = dict(EVENT, biometrics={"recognized": True, "person_name": "Ali"})
 
