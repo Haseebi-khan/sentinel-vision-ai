@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""VLM threat analyzer for the Track 1 (Vision AI) -> Track 2 (n8n) handoff.
+"""VLM threat analyzer: detection event + snapshot in, structured threat assessment out.
 
-Takes a detection event (same shape as the n8n webhook payload), asks a
+Takes a detection event (the automation webhook's payload shape), asks a
 vision-language model to assess the snapshot, and returns an `analysis`
-object that the n8n "Assess Threat & Priority" node already understands:
+object that an n8n threat-assessment node can consume directly:
 
     {analysis_status, threat_score (0-100), threat_level, reason,
      recommended_action, requires_human_review}

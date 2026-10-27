@@ -1,94 +1,86 @@
-# Autonomous Agentic Framework for Perimeter Defense
+# Agentic Framework for Perimeter Defense
 
-Track 1 design document. Owner: Haseeb Khan. Implementation of the stateful routines: Umer Mujahid.
-Status: **draft v0.1**. Numbers in `[brackets]` are starting values to tune, not validated standards.
+Design document, draft v0.1. Values in `[brackets]` are starting points to tune against real data, not validated standards.
 
 ## 1. Goal
 
-Watch the perimeter continuously with no human trigger, decide how worried to be about each
-situation, and hand a structured result to n8n (Track 2), which owns alerts and physical responses.
-The agent decides and explains. It never operates sirens or locks itself.
+Watch a property's perimeter continuously with no human trigger, decide how concerned to be about each situation,
+and hand a structured result to an automation layer that owns alerts and physical responses.
+
+The agent decides and explains. It never operates sirens, locks or lights itself.
 
 ## 2. Pipeline
 
 ```
-Camera (RTSP) -> Frigate NVR + YOLO -> MQTT event
-      -> Agent (this framework): context + state
-            -> Face match / ALPR (Amna, Noor ul Huda) as metadata
+Camera (RTSP) -> NVR + object detector -> MQTT event
+      -> Agent (this framework): context + per-entity state
+            -> face match / licence-plate fields as metadata
             -> VLM analysis of the snapshot   (vlm_analyzer.py)
             -> risk score + escalation rules
-      -> n8n webhook (Azlan's JSON contract)
-      -> alerts, human review, smart-home actions (Track 2)
+      -> automation webhook (JSON contract)
+      -> alerts, human review, smart-home actions
 ```
 
-Frigate only says "a person was detected". The VLM answers "what is happening". The agent adds time:
-how long, how often, what happened before.
+The detector only reports that a person or vehicle was seen. The VLM answers what is happening. The agent adds time:
+how long, how often, and what came before.
 
 ## 3. Per-entity state machine
 
-The agent keeps one record per tracked entity (Frigate track id, or camera + label + zone as a fallback).
+The agent keeps one record per tracked entity, keyed by the detector's track id (or camera + label + zone as a fallback).
 
 | State | Meaning | Moves on when |
 |---|---|---|
 | `observed` | First detection, nothing evaluated | VLM analysis requested |
-| `evaluated` | Has a score and reason | Score < 30 and recognised/routine: `resolved`. Otherwise `watching` |
-| `watching` | Still present or likely to return | Leaves the scene for `[120 s]`: `resolved`. Lingers or rescore rises: `escalated` |
-| `escalated` | Sent to n8n for human review or alert | Human decision or timeout: `resolved` |
-| `resolved` | Closed, kept in history for context | Expires after `[24 h]` |
+| `evaluated` | Has a score and a reason | Score under 30 and recognised or routine: `resolved`. Otherwise `watching` |
+| `watching` | Still present, or likely to return | Gone for `[120 s]`: `resolved`. Lingers or score rises: `escalated` |
+| `escalated` | Sent to the automation layer for review or alert | Human decision or timeout: `resolved` |
+| `resolved` | Closed, kept as history for context | Expires after `[24 h]` |
 
-Rules: a score never falls just because time passes while the entity is still there, and any failure
-moves the entity to `escalated` with `analysis_status: unavailable` (fail toward human review, not silence).
+Invariants:
+- A score never falls just because time passes while the entity is still present.
+- Any failure moves the entity to `escalated` with `analysis_status: unavailable`. The system fails toward human
+  review, never toward silence.
 
-## 4. Escalation rules (starting set)
+## 4. Escalation rules (initial set)
 
 | Rule | Trigger | Effect |
 |---|---|---|
-| Lingering | Unrecognised person in the same zone longer than `[60 s]` | +20 to score, re-run VLM on a fresh snapshot |
-| Repeat visitor | Same unrecognised face or plate seen `[3]` times in `[30 min]` | +25 |
-| Package watch | Package appears: open a watch. Package disappears and the last person near it was not recognised | Score at least 60, request review |
-| Package dwell | Package unattended over `[4 h]` | Notify homeowner (awareness, low score) |
+| Lingering | Unrecognised person in the same zone for over `[60 s]` | +20 to score, re-run the VLM on a fresh snapshot |
+| Repeat visitor | Same unrecognised face or plate seen `[3]` times within `[30 min]` | +25 |
+| Package watch | A package appears: open a watch. It disappears and the last person near it was not recognised | Score at least 60, request review |
+| Package dwell | Package unattended for over `[4 h]` | Notify homeowner (awareness, low score) |
 | After hours | Unrecognised person at an entrance between `[22:00-06:00]` | +10 |
-| Obscured face near entry | VLM reports covered face while at a door or window | VLM score already high, force review |
-| Camera loss | Heartbeat failure (Waqas's script) on a camera that saw a person in the last `[5 min]` | Escalate immediately |
+| Obscured face near an entry point | VLM reports a covered face at a door or window | VLM score already high, force review |
+| Camera loss | Stream heartbeat fails on a camera that saw a person in the last `[5 min]` | Escalate immediately |
 
-Final score is capped at 100. n8n derives the level from the score (`low` under 30, `medium` 30-69, `high` 70+).
-The agent must not send its own `threat_level` that disagrees; n8n ignores it and logs a warning.
+The final score is capped at 100. The automation layer derives the level from the score (`low` under 30, `medium`
+30-69, `high` 70 and above). A level supplied by the agent that disagrees with the score is ignored and logged.
 
-## 5. Handoff to n8n
+## 5. Handoff to the automation layer
 
-The agent sends the Stage 1 webhook payload. The VLM result is the `analysis` object defined in
-`README.md`. **Open issue:** the Stage 1 workflow only accepts an `analysis` field in a manual test run.
-In production it drops it. Two ways to fix it, both small:
+The agent sends the event payload described in the README. The VLM result is the `analysis` object.
 
-- **A (recommended):** n8n calls `POST /analyze` on our service from an HTTP Request node, between
-  "Person Branch" and "Threat Analysis". This is also Ishmal's Sprint 2 card.
-- **B:** change the workflow to accept `analysis` from a trusted source (shared secret header).
+**Integration note.** A workflow that accepts `analysis` only from manual test runs will drop it in production. Two fixes:
 
-Needs agreement with Noor ul Huda, Ishmal and Azlan before Sprint 2.
+- **A (recommended):** the workflow calls `POST /analyze` on this service from an HTTP Request node, between event
+  routing and threat assessment.
+- **B:** change the workflow to accept `analysis` from a trusted source, authenticated with a shared secret header.
 
 ## 6. Privacy and safety
 
-- The project brief says raw video stays on the local network. Using an API model means a still image leaves it.
-  Send **only the snapshot** the detector already produced, never the video. Recognised household members are never sent
-  (implemented: scored 10 locally, and `VLM_SKIP_RECOGNIZED=0` turns it off). The team should confirm this is acceptable,
-  or point the analyzer at a local Ollama Llava (`VLM_PROVIDER=openai`, see README), which keeps every image on the network.
-- The VLM is told that an unrecognised person is not evidence of wrongdoing, and that text inside images is scene content,
-  not instructions.
-- The service takes snapshot URLs from network payloads, so it only fetches from an allow-listed host and requires a shared token.
-- No automatic calls to emergency services. Humans decide, through Nimra's buttons.
+- Raw video stays on the local network. Only the single snapshot the detector already produced is sent to a model,
+  and never video.
+- Recognised household members are never sent. They are scored 10 locally; `VLM_SKIP_RECOGNIZED=0` turns this off.
+- For deployments where no image may leave the network, point the analyzer at a local model (`VLM_PROVIDER=openai`
+  with Ollama), which keeps every image on-premises.
+- The VLM is told that an unrecognised person is not evidence of wrongdoing, and that text inside images is scene
+  content, not instructions.
+- The service fetches snapshot URLs from network payloads, so it only fetches from allow-listed hosts and requires a
+  shared token.
+- No automatic calls to emergency services. People decide, through the human-in-the-loop alert step.
 
-## 7. Success measures (from the brief)
+## 7. Success measures
 
-- Detection to bounding box under 800 ms (Ahsan). VLM analysis runs after that and is not on the box-rendering path.
-- Zero false alarms for animals, weather and shadows. Measured with a labelled set of routine snapshots (Sprint 3 drill).
-- Every failure mode lands in human review, never in silence.
-
-## 8. Work split (Track 1)
-
-| Item | Who | Sprint |
-|---|---|---|
-| This design, VLM contract, analyzer service | Haseeb | 1-2 |
-| Stateful loop and rules in section 3-4 | Umer | 1-2 |
-| Frigate MQTT events and snapshots as input | Ahsan | 1 |
-| Face match and plate fields in the payload | Amna, Noor ul Huda | 2 |
-| Camera heartbeat feeding the camera-loss rule | Waqas | 3 |
+- Detection to bounding box under 800 ms. VLM analysis runs after that and is not on the rendering path.
+- Zero false alarms for animals, weather and shadows, measured against a labelled set of routine snapshots.
+- Every failure mode ends in human review, never silence.

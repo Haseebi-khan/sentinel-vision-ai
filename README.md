@@ -1,71 +1,107 @@
 # sentinel-vision-ai
 
-Track 1 (Vision AI & Edge Ingestion) of an AI-powered home security system. Turns a detection
-event plus its snapshot into a threat assessment that the n8n automation workflow ("Stage 1: Event
-Validation") already accepts. Works with Anthropic models or any OpenAI-compatible server,
-including a local Ollama, so video analysis can stay on the local network.
+Vision-language threat analysis for a local-first home security system.
+
+Given a camera detection and its snapshot, `sentinel-vision-ai` asks a vision-language model (VLM) what is
+actually happening and returns a structured threat assessment: a 0-100 score, a plain-language reason, a
+recommended action and a human-review flag. The result is designed to plug straight into an automation
+workflow such as n8n.
+
+It has no third-party dependencies (Python 3.9+ standard library only) and works with Anthropic models,
+any OpenAI-compatible API, or a local model served by Ollama.
+
+## Features
+
+- **Provider-agnostic.** Anthropic, OpenAI, or any OpenAI-compatible server (Ollama, vLLM, LM Studio).
+- **Fails safe.** Any error (network, bad key, unreadable image, malformed reply) returns
+  `analysis_status: "unavailable"`, so downstream automation falls back to human review rather than staying silent.
+- **Privacy aware.** Recognised household members are scored locally and their snapshots never leave the machine.
+  Pointing the analyzer at a local model keeps every image on your network.
+- **Calibrated prompt.** The model is told that an unrecognised person is not evidence of wrongdoing, and that text
+  inside an image is scene content, never instructions.
+- **Two interfaces.** A command-line tool for testing and an HTTP service for workflow engines.
+- **Hardened service.** Shared-token authentication, an allow-list of hosts snapshots may be fetched from, request
+  size limits, and local-file access disabled.
+
+## How it works
 
 ```
-vlm_analyzer.py          analyzer: CLI and HTTP service (Python standard library only)
-docs/agent-framework.md  design: pipeline, state machine, escalation rules, privacy
-samples/                 webhook-shaped example events (person and vehicle use real public photos)
-tests/test_analyzer.py   29 tests, no API key needed
+camera -> NVR / object detector -> detection event + snapshot
+                                          |
+                                          v
+                              sentinel-vision-ai  --->  VLM (cloud or local)
+                                          |
+                                          v
+                       threat assessment (score, reason, action)
+                                          |
+                                          v
+                        automation workflow: alert, review, respond
+```
+
+See [docs/agent-framework.md](docs/agent-framework.md) for the full design, including the per-entity state
+machine and escalation rules.
+
+## Quick start
+
+```bash
+git clone https://github.com/Haseebi-khan/sentinel-vision-ai.git
+cd sentinel-vision-ai
+
+export VLM_API_KEY=your-key            # see Configuration for other providers
+python3 vlm_analyzer.py analyze samples/person_unknown.json
+```
+
+The sample events reference public photos, so no camera is needed. To analyse your own image:
+
+```bash
+python3 vlm_analyzer.py analyze samples/person_unknown.json --image ~/photo.jpg   # file path or URL
+python3 vlm_analyzer.py analyze samples/person_unknown.json --dry-run             # show the prompt, no API call
 ```
 
 ## Configuration
 
-All settings are environment variables. Never commit a key.
+All settings are environment variables. Keys are never read from files in the repository.
 
-| Variable | Meaning |
-|---|---|
-| `VLM_PROVIDER` | `anthropic` (default) or `openai` (any OpenAI-compatible server) |
-| `VLM_API_KEY` | API key. Required for `anthropic`, optional for local servers |
-| `VLM_MODEL` | Model name. Default for `anthropic`, required for `openai` |
-| `VLM_API_URL` | Override the endpoint |
-| `VLM_TIMEOUT` | Seconds to wait for the model (default 30) |
-| `VLM_SKIP_RECOGNIZED` | Set to `0` to also send recognised household members to the model |
+| Variable | Description | Default |
+|---|---|---|
+| `VLM_PROVIDER` | `anthropic` or `openai` (any OpenAI-compatible server) | `anthropic` |
+| `VLM_API_KEY` | API key. Required for `anthropic`, optional for local servers | none |
+| `VLM_MODEL` | Model name. Required for `openai` | `claude-sonnet-5-5` for `anthropic` |
+| `VLM_API_URL` | Endpoint override | provider default |
+| `VLM_TIMEOUT` | Seconds to wait for the model | `30` |
+| `VLM_SKIP_RECOGNIZED` | `0` to also send recognised household members to the model | `1` |
 
 ```bash
 # Anthropic
 export VLM_API_KEY=your-key
 
 # OpenAI
-export VLM_PROVIDER=openai VLM_API_KEY=your-key VLM_MODEL=<a vision-capable model>
+export VLM_PROVIDER=openai VLM_API_KEY=your-key VLM_MODEL=<vision-capable model>
 
-# Local Ollama (nothing leaves the network)
+# Local Ollama: nothing leaves your network
 export VLM_PROVIDER=openai VLM_MODEL=llava \
        VLM_API_URL=http://localhost:11434/v1/chat/completions
 ```
 
-## Try it
+## Input
 
-```bash
-# The samples point at real public photos, so no --image is needed:
-python3 vlm_analyzer.py analyze samples/person_unknown.json
-python3 vlm_analyzer.py analyze samples/vehicle_with_plate.json
+A detection event as JSON. This is the same payload the automation workflow receives:
 
-# Your own photo (path or URL):
-python3 vlm_analyzer.py analyze samples/person_unknown.json --image ~/photo.jpg
-
-python3 vlm_analyzer.py analyze samples/package.json --dry-run   # prompt only, no API call
-python3 -I tests/test_analyzer.py
+```json
+{
+  "event_id": "evt-0001",
+  "timestamp": "2026-10-27T21:15:00Z",
+  "camera_id": "front_door",
+  "snapshot_url": "https://example.local/snapshot.jpg",
+  "detection": { "label": "person", "confidence": 0.91, "bounding_box": [412, 120, 233, 540] },
+  "biometrics": { "recognized": false, "person_name": "unknown" },
+  "alpr": { "plate_text": "ABC123", "plate_confidence": 0.82 }
+}
 ```
 
-`samples/package.json` still has a placeholder camera URL: pass `--image` with a real photo.
+`alpr` is optional. See [samples/](samples/) for complete examples.
 
-## Service for n8n
-
-```bash
-export VLM_SERVICE_TOKEN=pick-a-long-random-string
-export VLM_ALLOWED_IMAGE_HOSTS=frigate.local      # hosts snapshots may be fetched from
-python3 vlm_analyzer.py serve --port 8800
-```
-
-In n8n add an HTTP Request node: `POST http://<host>:8800/analyze`, header `x-service-token`,
-body = the webhook payload (or `{"body": ...}`). The response is the analysis object below.
-`GET /health` checks it is up. It listens on 127.0.0.1 unless you pass `--host`.
-
-## Output contract (the `analysis` object)
+## Output
 
 ```json
 {
@@ -81,18 +117,52 @@ body = the webhook payload (or `{"body": ...}`). The response is the analysis ob
 }
 ```
 
-| Field | Rule |
+| Field | Meaning |
 |---|---|
-| `threat_score` | Integer 0-100. n8n derives the level: under 30 low, 30-69 medium, 70+ high |
-| `recommended_action` | `log_only`, `notify_homeowner` or `request_human_review` (the values n8n allows) |
-| `analysis_status` | `completed` on success. On any failure: `{"analysis_status":"unavailable","reason":"..."}`, which n8n turns into a human-review fallback |
-| `image_quality` | `unusable` forces `requires_human_review: true`, so a dark or blocked image is never scored safe |
+| `analysis_status` | `completed`, or `unavailable` with a `reason` when analysis could not be done |
+| `threat_score` | Integer 0-100 |
+| `threat_level` | `low` (under 30), `medium` (30-69) or `high` (70 and above) |
+| `recommended_action` | `log_only`, `notify_homeowner` or `request_human_review` |
+| `requires_human_review` | Whether a person should look at the event |
+| `image_quality` | `good`, `poor` or `unusable`. `unusable` always forces human review, so an unreadable image is never scored as safe |
 
-A person matched to a known household member is scored 10 locally (`model: "local-rule"`) and the
-snapshot is never sent to any model.
+A person matched to a known household member is scored 10 locally with `"model": "local-rule"`.
 
-## Known gaps
+## HTTP service
 
-1. Stage 1 drops a payload `analysis` outside manual tests, so n8n must call the service. See `docs/agent-framework.md` section 5.
-2. Verified with a stand-in model server and real downloaded photos, not yet with a live model API key.
-3. Score rules (lingering, repeat visitor, package watch) are specified in the design doc, not yet coded.
+```bash
+export VLM_SERVICE_TOKEN=a-long-random-string
+export VLM_ALLOWED_IMAGE_HOSTS=camera.local,nvr.local     # hosts snapshots may be fetched from
+python3 vlm_analyzer.py serve --port 8800
+```
+
+| Endpoint | Description |
+|---|---|
+| `POST /analyze` | Body: an event (or `{"body": event}`). Header: `x-service-token`. Returns the output above |
+| `GET /health` | Liveness check |
+
+The service binds to `127.0.0.1` by default; use `--host` to expose it, and only on a trusted network.
+In n8n, call it from an HTTP Request node placed before the threat-assessment step.
+
+## Testing
+
+```bash
+python3 -I tests/test_analyzer.py
+```
+
+The 29 tests run offline against local stand-in servers, so no API key is needed. They cover response parsing and
+validation, both provider request formats, failure fallbacks, image handling and the service's security checks.
+
+## Project status
+
+Working: analyzer, both providers, CLI, HTTP service, tests, and the design for the stateful agent.
+
+Planned:
+- Stateful escalation rules (lingering, repeat visitors, package monitoring), specified in the design document.
+- Validation against live camera snapshots and a labelled false-alarm set.
+
+## Security notes
+
+- Never commit an API key. Keys are read from the environment only.
+- The service fetches images from URLs in the request body, so set `VLM_ALLOWED_IMAGE_HOSTS` and `VLM_SERVICE_TOKEN`.
+- Sending a snapshot to a cloud provider means that image leaves your network. Use a local model if that is not acceptable.
