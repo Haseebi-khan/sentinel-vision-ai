@@ -4,7 +4,7 @@ import sys
 import threading
 import unittest
 import urllib.request
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import vlm_analyzer as v  # noqa: E402
@@ -23,6 +23,9 @@ GOOD = {
     "recommended_action": "request_human_review", "requires_human_review": True,
     "visible_evidence": ["person at door"], "image_quality": "good",
 }
+
+
+CFG = {"provider": "anthropic", "url": "", "model": "test-model", "key": "k", "timeout": 5}
 
 
 def fake_loader(ref):
@@ -70,31 +73,158 @@ class ParseTests(unittest.TestCase):
 
 class AnalyzeTests(unittest.TestCase):
     def test_success(self):
-        out = v.analyze(EVENT, loader=fake_loader, caller=fake_caller(GOOD), api_key="k")
+        out = v.analyze(EVENT, loader=fake_loader, caller=fake_caller(GOOD), cfg=CFG)
         self.assertEqual(out["analysis_status"], "completed")
 
     def test_garbage_reply_is_unavailable(self):
-        out = v.analyze(EVENT, loader=fake_loader, caller=fake_caller("nope"), api_key="k")
+        out = v.analyze(EVENT, loader=fake_loader, caller=fake_caller("nope"), cfg=CFG)
         self.assertEqual(out["analysis_status"], "unavailable")
 
     def test_missing_key_is_unavailable(self):
-        old = os.environ.pop("ANTHROPIC_API_KEY", None)
+        saved = {k: os.environ.pop(k, None) for k in ("VLM_API_KEY", "VLM_PROVIDER")}
         try:
             out = v.analyze(EVENT, loader=fake_loader, caller=fake_caller(GOOD))
         finally:
-            if old:
-                os.environ["ANTHROPIC_API_KEY"] = old
+            for k, val in saved.items():
+                if val is not None:
+                    os.environ[k] = val
         self.assertEqual(out["analysis_status"], "unavailable")
+        self.assertIn("VLM_API_KEY", out["reason"])
 
     def test_unexpected_exception_is_unavailable(self):
         def boom(*a):
             raise RuntimeError("x")
-        out = v.analyze(EVENT, loader=fake_loader, caller=boom, api_key="k")
+        out = v.analyze(EVENT, loader=fake_loader, caller=boom, cfg=CFG)
         self.assertEqual(out["analysis_status"], "unavailable")
 
     def test_no_snapshot(self):
         ev = {k: val for k, val in EVENT.items() if k != "snapshot_url"}
-        self.assertEqual(v.analyze(ev, api_key="k")["analysis_status"], "unavailable")
+        self.assertEqual(v.analyze(ev, cfg=CFG)["analysis_status"], "unavailable")
+
+
+class ResidentTests(unittest.TestCase):
+    RESIDENT = dict(EVENT, biometrics={"recognized": True, "person_name": "Ali"})
+
+    def test_recognised_resident_skips_model(self):
+        def must_not_call(*a):
+            raise AssertionError("model was called")
+        out = v.analyze(self.RESIDENT, loader=must_not_call, caller=must_not_call, cfg=CFG)
+        self.assertEqual(out["threat_score"], 10)
+        self.assertFalse(out["requires_human_review"])
+        self.assertEqual(out["model"], "local-rule")
+
+    def test_unknown_name_is_not_a_resident(self):
+        ev = dict(EVENT, biometrics={"recognized": True, "person_name": "unknown"})
+        self.assertIsNone(v.recognized_resident(ev))
+
+    def test_vehicle_never_skipped(self):
+        ev = dict(self.RESIDENT, detection=dict(EVENT["detection"], label="car"))
+        self.assertIsNone(v.recognized_resident(ev))
+
+    def test_can_be_switched_off(self):
+        os.environ["VLM_SKIP_RECOGNIZED"] = "0"
+        try:
+            self.assertIsNone(v.recognized_resident(self.RESIDENT))
+        finally:
+            del os.environ["VLM_SKIP_RECOGNIZED"]
+
+
+class ConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.saved = {k: os.environ.pop(k, None) for k in
+                      ("VLM_PROVIDER", "VLM_API_KEY", "VLM_MODEL", "VLM_API_URL")}
+
+    def tearDown(self):
+        for k, val in self.saved.items():
+            os.environ.pop(k, None)
+            if val is not None:
+                os.environ[k] = val
+
+    def test_default_needs_key(self):
+        with self.assertRaises(v.AnalyzerError):
+            v.get_config()
+
+    def test_anthropic_defaults(self):
+        os.environ["VLM_API_KEY"] = "k"
+        cfg = v.get_config()
+        self.assertEqual(cfg["provider"], "anthropic")
+        self.assertTrue(cfg["model"])
+
+    def test_openai_needs_model_but_not_key(self):
+        os.environ["VLM_PROVIDER"] = "openai"
+        with self.assertRaises(v.AnalyzerError):
+            v.get_config()
+        os.environ["VLM_MODEL"] = "llava"
+        self.assertEqual(v.get_config()["key"], "")
+
+    def test_unknown_provider(self):
+        os.environ["VLM_PROVIDER"] = "nope"
+        with self.assertRaises(v.AnalyzerError):
+            v.get_config()
+
+
+class FakeModelServer(BaseHTTPRequestHandler):
+    seen = {}
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        FakeModelServer.seen = {"path": self.path, "headers": {k.lower(): val for k, val in self.headers.items()}, "body": body}
+        if self.path == "/v1/messages":
+            reply = {"content": [{"type": "text", "text": json.dumps(GOOD)}]}
+        else:
+            reply = {"choices": [{"message": {"content": json.dumps(GOOD)}}]}
+        data = json.dumps(reply).encode()
+        self.send_response(200)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *a):
+        pass
+
+
+class ProviderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeModelServer)
+        cls.base = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def run_provider(self, cfg):
+        return v.analyze(EVENT, loader=fake_loader, cfg=cfg)
+
+    def test_anthropic_request_shape(self):
+        out = self.run_provider(dict(CFG, url=self.base + "/v1/messages"))
+        self.assertEqual(out["analysis_status"], "completed")
+        seen = FakeModelServer.seen
+        self.assertEqual(seen["headers"]["x-api-key"], "k")
+        block = seen["body"]["messages"][0]["content"][0]
+        self.assertEqual(block["source"]["type"], "base64")
+
+    def test_openai_request_shape_without_key(self):
+        cfg = {"provider": "openai", "url": self.base + "/v1/chat/completions",
+               "model": "llava", "key": "", "timeout": 5}
+        out = self.run_provider(cfg)
+        self.assertEqual(out["analysis_status"], "completed")
+        self.assertEqual(out["model"], "llava")
+        seen = FakeModelServer.seen
+        self.assertNotIn("authorization", {k.lower() for k in seen["headers"]})
+        image = seen["body"]["messages"][1]["content"][1]["image_url"]["url"]
+        self.assertTrue(image.startswith("data:image/jpeg;base64,"))
+
+    def test_openai_sends_bearer_key(self):
+        cfg = {"provider": "openai", "url": self.base + "/v1/chat/completions",
+               "model": "m", "key": "secret", "timeout": 5}
+        self.run_provider(cfg)
+        self.assertEqual(FakeModelServer.seen["headers"]["authorization"], "Bearer secret")
+
+    def test_dead_server_is_unavailable(self):
+        out = self.run_provider(dict(CFG, url="http://127.0.0.1:1/x"))
+        self.assertEqual(out["analysis_status"], "unavailable")
 
 
 class ImageTests(unittest.TestCase):

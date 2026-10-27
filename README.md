@@ -1,26 +1,57 @@
-# Track 1: Vision AI & Edge Ingestion (VLM handoff)
+# sentinel-vision-ai
 
-Owner: Haseeb Khan. Turns a detection event plus its snapshot into a threat assessment that the
-Track 2 n8n workflow ("Stage 1: Event Validation") already accepts.
+Track 1 (Vision AI & Edge Ingestion) of an AI-powered home security system. Turns a detection
+event plus its snapshot into a threat assessment that the n8n automation workflow ("Stage 1: Event
+Validation") already accepts. Works with Anthropic models or any OpenAI-compatible server,
+including a local Ollama, so video analysis can stay on the local network.
 
 ```
-track1-vision-ai/
-  vlm_analyzer.py        analyzer: CLI and HTTP service (standard library only)
-  docs/agent-framework.md  design for the Track 1 lead card
-  samples/               webhook-shaped example events
-  tests/test_analyzer.py 17 tests, no API key needed
+vlm_analyzer.py          analyzer: CLI and HTTP service (Python standard library only)
+docs/agent-framework.md  design: pipeline, state machine, escalation rules, privacy
+samples/                 webhook-shaped example events (person and vehicle use real public photos)
+tests/test_analyzer.py   29 tests, no API key needed
 ```
 
-## Quick start
+## Configuration
+
+All settings are environment variables. Never commit a key.
+
+| Variable | Meaning |
+|---|---|
+| `VLM_PROVIDER` | `anthropic` (default) or `openai` (any OpenAI-compatible server) |
+| `VLM_API_KEY` | API key. Required for `anthropic`, optional for local servers |
+| `VLM_MODEL` | Model name. Default for `anthropic`, required for `openai` |
+| `VLM_API_URL` | Override the endpoint |
+| `VLM_TIMEOUT` | Seconds to wait for the model (default 30) |
+| `VLM_SKIP_RECOGNIZED` | Set to `0` to also send recognised household members to the model |
 
 ```bash
-export ANTHROPIC_API_KEY=...            # never commit this
-# optional: export VLM_MODEL=claude-haiku-5-5   (faster and cheaper; default is claude-sonnet-5-5)
+# Anthropic
+export VLM_API_KEY=your-key
 
-python3 vlm_analyzer.py analyze samples/person_unknown.json --image /path/to/snapshot.jpg
-python3 vlm_analyzer.py analyze samples/person_unknown.json --dry-run     # prompt only, no API call
+# OpenAI
+export VLM_PROVIDER=openai VLM_API_KEY=your-key VLM_MODEL=<a vision-capable model>
+
+# Local Ollama (nothing leaves the network)
+export VLM_PROVIDER=openai VLM_MODEL=llava \
+       VLM_API_URL=http://localhost:11434/v1/chat/completions
+```
+
+## Try it
+
+```bash
+# The samples point at real public photos, so no --image is needed:
+python3 vlm_analyzer.py analyze samples/person_unknown.json
+python3 vlm_analyzer.py analyze samples/vehicle_with_plate.json
+
+# Your own photo (path or URL):
+python3 vlm_analyzer.py analyze samples/person_unknown.json --image ~/photo.jpg
+
+python3 vlm_analyzer.py analyze samples/package.json --dry-run   # prompt only, no API call
 python3 -I tests/test_analyzer.py
 ```
+
+`samples/package.json` still has a placeholder camera URL: pass `--image` with a real photo.
 
 ## Service for n8n
 
@@ -46,7 +77,7 @@ body = the webhook payload (or `{"body": ...}`). The response is the analysis ob
   "requires_human_review": true,
   "visible_evidence": ["person at front door"],
   "image_quality": "good",
-  "model": "claude-sonnet-5-5"
+  "model": "<model name>"
 }
 ```
 
@@ -57,12 +88,11 @@ body = the webhook payload (or `{"body": ...}`). The response is the analysis ob
 | `analysis_status` | `completed` on success. On any failure: `{"analysis_status":"unavailable","reason":"..."}`, which n8n turns into a human-review fallback |
 | `image_quality` | `unusable` forces `requires_human_review: true`, so a dark or blocked image is never scored safe |
 
-Extra fields (`visible_evidence`, `image_quality`, `model`) are ignored by Stage 1 today and are
-there for the log and for Nimra's alert text.
+A person matched to a known household member is scored 10 locally (`model: "local-rule"`) and the
+snapshot is never sent to any model.
 
 ## Known gaps
 
 1. Stage 1 drops a payload `analysis` outside manual tests, so n8n must call the service. See `docs/agent-framework.md` section 5.
-2. Not yet run against the live API or real Frigate snapshots. Tests use a fake model. Needs a key and a few real images.
-3. Sending snapshots to an API conflicts with the "all video stays local" goal. See section 6 of the design doc.
-4. Score rules (lingering, repeat visitor, package watch) are specified, not yet coded. That is Umer's card.
+2. Verified with a stand-in model server and real downloaded photos, not yet with a live model API key.
+3. Score rules (lingering, repeat visitor, package watch) are specified in the design doc, not yet coded.

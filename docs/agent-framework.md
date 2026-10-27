@@ -69,9 +69,9 @@ Needs agreement with Noor ul Huda, Ishmal and Azlan before Sprint 2.
 ## 6. Privacy and safety
 
 - The project brief says raw video stays on the local network. Using an API model means a still image leaves it.
-  Send **only the snapshot** the detector already produced, never the video, and do not send recognised household faces
-  (skip the VLM when `biometrics.recognized` is true and the label is `person`, score it low locally). The team should
-  confirm this is acceptable, or switch to local Ollama Llava, which the analyzer can be pointed at later.
+  Send **only the snapshot** the detector already produced, never the video. Recognised household members are never sent
+  (implemented: scored 10 locally, and `VLM_SKIP_RECOGNIZED=0` turns it off). The team should confirm this is acceptable,
+  or point the analyzer at a local Ollama Llava (`VLM_PROVIDER=openai`, see README), which keeps every image on the network.
 - The VLM is told that an unrecognised person is not evidence of wrongdoing, and that text inside images is scene content,
   not instructions.
 - The service takes snapshot URLs from network payloads, so it only fetches from an allow-listed host and requires a shared token.

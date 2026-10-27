@@ -11,6 +11,14 @@ object that the n8n "Assess Threat & Priority" node already understands:
 Standard library only. Never raises from analyze(): any failure returns
 analysis_status "unavailable", which n8n turns into a human-review fallback.
 
+Configuration (environment variables):
+    VLM_PROVIDER   "anthropic" (default) or "openai" (any OpenAI-compatible server, incl. local Ollama)
+    VLM_API_KEY    API key. Required for anthropic, optional for local servers.
+    VLM_MODEL      Model name. Has a default for anthropic, required for openai.
+    VLM_API_URL    Override the endpoint (e.g. http://localhost:11434/v1/chat/completions for Ollama).
+    VLM_TIMEOUT    Seconds to wait for the model (default 30).
+    VLM_SKIP_RECOGNIZED  Set to 0 to also send recognised household members to the model.
+
 Usage:
     python3 vlm_analyzer.py analyze samples/person_unknown.json --image shot.jpg
     python3 vlm_analyzer.py analyze samples/person_unknown.json --dry-run
@@ -26,9 +34,12 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-API_URL = os.environ.get("ANTHROPIC_API_URL", "https://api.anthropic.com/v1/messages")
-MODEL = os.environ.get("VLM_MODEL", "claude-sonnet-5-5")
-API_TIMEOUT = float(os.environ.get("VLM_TIMEOUT", "30"))
+# Provider "anthropic" speaks the Messages API. Provider "openai" speaks the
+# OpenAI-style chat-completions API, which also covers Ollama (/v1), vLLM and LM Studio.
+PROVIDERS = {
+    "anthropic": {"url": "https://api.anthropic.com/v1/messages", "model": "claude-sonnet-5-5", "key_required": True},
+    "openai": {"url": "https://api.openai.com/v1/chat/completions", "model": "", "key_required": False},
+}
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_BODY_BYTES = 64 * 1024
 
@@ -123,40 +134,82 @@ def build_context(event):
 
 # --------------------------------------------------------------------------- model call
 
-def call_api(system, media_type, image_b64, context_text, api_key):
-    body = {
-        "model": MODEL,
-        "max_tokens": 500,
-        "system": system,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
-                {"type": "text", "text": "Detector metadata:\n" + context_text + "\n\nReturn the JSON object."},
-            ],
-        }],
+def get_config():
+    """Read the provider settings from the environment (at call time, so tests can change them)."""
+    provider = os.environ.get("VLM_PROVIDER", "anthropic").strip().lower()
+    if provider not in PROVIDERS:
+        raise AnalyzerError("VLM_PROVIDER must be one of: %s" % ", ".join(PROVIDERS))
+    default = PROVIDERS[provider]
+    cfg = {
+        "provider": provider,
+        "url": os.environ.get("VLM_API_URL") or default["url"],
+        "model": os.environ.get("VLM_MODEL") or default["model"],
+        "key": os.environ.get("VLM_API_KEY", ""),
+        "timeout": float(os.environ.get("VLM_TIMEOUT", "30")),
     }
+    if not cfg["model"]:
+        raise AnalyzerError("VLM_MODEL must be set for provider %r" % provider)
+    if default["key_required"] and not cfg["key"]:
+        raise AnalyzerError("VLM_API_KEY is not set")
+    return cfg
+
+
+def _post_json(url, body, headers, timeout):
     req = urllib.request.Request(
-        API_URL,
+        url,
         data=json.dumps(body).encode("utf-8"),
-        headers={
-            "content-type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
+        headers=dict({"content-type": "application/json"}, **headers),
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
-            payload = json.load(resp)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.load(resp)
     except urllib.error.HTTPError as exc:
         raise AnalyzerError("model API returned HTTP %d" % exc.code)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise AnalyzerError("model API call failed: %s" % exc)
-    parts = [b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text"]
-    if not parts:
+
+
+def call_api(system, media_type, image_b64, context_text, cfg):
+    """Send the snapshot to the configured provider and return the reply text."""
+    user_text = "Detector metadata:\n" + context_text + "\n\nReturn the JSON object."
+    if cfg["provider"] == "anthropic":
+        body = {
+            "model": cfg["model"],
+            "max_tokens": 500,
+            "system": system,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+                    {"type": "text", "text": user_text},
+                ],
+            }],
+        }
+        headers = {"x-api-key": cfg["key"], "anthropic-version": "2023-06-01"}
+        payload = _post_json(cfg["url"], body, headers, cfg["timeout"])
+        parts = [b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text"]
+        text = "".join(parts)
+    else:
+        body = {
+            "model": cfg["model"],
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": [
+                    {"type": "text", "text": user_text},
+                    {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (media_type, image_b64)}},
+                ]},
+            ],
+        }
+        headers = {"authorization": "Bearer " + cfg["key"]} if cfg["key"] else {}
+        payload = _post_json(cfg["url"], body, headers, cfg["timeout"])
+        try:
+            text = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise AnalyzerError("model reply had no message content")
+    if not isinstance(text, str) or not text.strip():
         raise AnalyzerError("model returned no text")
-    return "".join(parts)
+    return text
 
 
 # --------------------------------------------------------------------------- output
@@ -169,7 +222,7 @@ def level_for(score):
     return "low"
 
 
-def parse_analysis(text):
+def parse_analysis(text, model="unknown"):
     """Turn the model's reply into the analysis object, or raise AnalyzerError."""
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
@@ -219,7 +272,7 @@ def parse_analysis(text):
         "requires_human_review": review,
         "visible_evidence": evidence,
         "image_quality": quality,
-        "model": MODEL,
+        "model": model,
     }
 
 
@@ -227,18 +280,37 @@ def unavailable(why):
     return {"analysis_status": "unavailable", "reason": why}
 
 
-def analyze(event, image_ref=None, loader=load_image, caller=call_api, api_key=None):
+def recognized_resident(event):
+    """Name of a face-matched household member, else None. Their snapshot is never sent out."""
+    if os.environ.get("VLM_SKIP_RECOGNIZED", "1") == "0":
+        return None
+    det = event.get("detection") or {}
+    bio = event.get("biometrics") or {}
+    name = bio.get("person_name")
+    if (str(det.get("label", "")).strip().lower() == "person" and bio.get("recognized") is True
+            and isinstance(name, str) and name.strip() and name.strip().lower() != "unknown"):
+        return name.strip()[:60]
+    return None
+
+
+def analyze(event, image_ref=None, loader=load_image, caller=call_api, cfg=None):
     """Analyse one event. Never raises; failures come back as 'unavailable'."""
     try:
+        name = recognized_resident(event)
+        if name:
+            return {
+                "analysis_status": "completed", "threat_score": 10, "threat_level": "low",
+                "reason": "Recognised household member (%s); snapshot not sent to the model." % name,
+                "recommended_action": "log_only", "requires_human_review": False,
+                "visible_evidence": [], "image_quality": "not_assessed", "model": "local-rule",
+            }
         ref = image_ref or event.get("snapshot_url")
         if not ref:
             raise AnalyzerError("no snapshot to analyse")
-        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise AnalyzerError("ANTHROPIC_API_KEY is not set")
+        cfg = cfg or get_config()
         media_type, image_b64 = loader(ref)
         context = json.dumps(build_context(event), indent=2)
-        return parse_analysis(caller(SYSTEM_PROMPT, media_type, image_b64, context, key))
+        return parse_analysis(caller(SYSTEM_PROMPT, media_type, image_b64, context, cfg), cfg["model"])
     except AnalyzerError as exc:
         return unavailable(str(exc))
     except Exception as exc:  # last resort: the pipeline must keep moving
@@ -259,7 +331,7 @@ def make_handler(token, allowed_hosts):
 
         def do_GET(self):
             if self.path == "/health":
-                self._send(200, {"ok": True, "model": MODEL})
+                self._send(200, {"ok": True, "provider": os.environ.get("VLM_PROVIDER", "anthropic")})
             else:
                 self._send(404, {"error": "not found"})
 
